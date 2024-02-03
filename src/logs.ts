@@ -8,6 +8,33 @@ export interface Search {
   readonly pageLength: number;
 }
 
+const readFully = async (
+  fd: fs.FileHandle,
+  options: fs.FileReadOptions
+): Promise<boolean> => {
+  let { buffer, offset, length, position } = options;
+  while (offset < length) {
+    console.log("reading chunk", { offset, length, position });
+    const { bytesRead } = await fd.read({
+      buffer,
+      offset,
+      length,
+      position,
+    });
+    if (bytesRead === 0) {
+      // https://nodejs.org/api/fs.html#filehandlereadoptions "If the file is not
+      // modified concurrently, the end-of-file is reached when the number of
+      // bytes read is zero." We're reading backwards, so this shouldn't ever
+      // happen. If it does, it probably indicates the file was overwritten.
+      // Regardless, we can't read the full page, so we discard the partial page
+      // and return failure.
+      return false;
+    }
+    offset += bytesRead;
+  }
+  return true;
+};
+
 export async function* findLatestLines(search: Search): AsyncGenerator<Buffer> {
   const { path, total, pred, maxLineLength, pageLength } = search;
   const fd = await fs.open(path, fs.constants.O_RDONLY);
@@ -20,35 +47,24 @@ export async function* findLatestLines(search: Search): AsyncGenerator<Buffer> {
     let remainder = Buffer.alloc(0);
     const page = Buffer.alloc(pageLength);
     while (i < total && lastPosition > 0) {
-      let offset = 0;
       let length = pageLength;
       let position = lastPosition - pageLength;
       if (position < 0) {
         length += position;
         position = 0;
       }
-      console.log("reading page", { offset, length, position });
-      // Fully read the page. Since we're reading pages from the end of the file,
-      // we can't work with partial results.
-      while (offset < length) {
-        console.log("reading chunk", { offset, length, position });
-        const { bytesRead } = await fd.read({
-          buffer: page,
-          offset,
-          length,
-          position,
-        });
-        if (bytesRead === 0) {
-          // https://nodejs.org/api/fs.html#filehandlereadoptions If the file is not
-          // modified concurrently, the end-of-file is reached when the number of
-          // bytes read is zero. We're reading backwards, so this shouldn't ever
-          // happen. If it does, it probably indicates the file was overwritten. By
-          // returning here, we're treating that as sort of an event horizon; we
-          // generated what we could before the events became unavailable. One could
-          // reasonably treat this as a form of filesystem error though.
-          return;
-        }
-        offset += bytesRead;
+      console.log("reading page", { length, position });
+      const fullyRead = await readFully(fd, {
+        buffer: page,
+        offset: 0,
+        length,
+        position,
+      });
+      if (!fullyRead) {
+        // If we hit the end of the file unexpectedly, we could reasonably just
+        // keep whatever we've generated thus far, or error out. The former
+        // seems both logically defensible and user-friendly.
+        return;
       }
       // We just yield the pages for now to see how buggy this junk is.
       const result = Buffer.alloc(length);
