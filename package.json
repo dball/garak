@@ -11,5 +11,9 @@
   "dependencies": {
     "@types/node": "^20.11.16",
     "ts-node": "^10.9.2"
+  },
+  "devDependencies": {
+    "@types/jest": "^29.5.12",
+    "ts-jest": "^29.1.2"
   }
 }
