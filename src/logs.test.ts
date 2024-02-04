@@ -11,6 +11,7 @@ const largeLogPath = path.resolve(__dirname, "..", "tmp", "large.log");
  *
  * It will throw on any filesystem error.
  */
+// A useful stress test: curl 'http://localhost:8000/logs?file=large.log&total=10&keywords=odd&keywords=9111111'
 export const writeTestFile = async () => {
   const fd = await fs.open(
     largeLogPath,
