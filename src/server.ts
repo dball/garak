@@ -1,5 +1,10 @@
+import * as fs from "node:fs/promises";
 import * as http from "node:http";
+import * as path from "node:path";
+import * as querystring from "node:querystring";
+import * as stream from "node:stream";
 import * as Koa from "koa";
+import * as logs from "./logs";
 
 interface Config {
   port: number;
@@ -52,6 +57,7 @@ const buildConfigFromArgs = (): Config => {
       }
     }
     if (config != null) {
+      // TODO check that logsDir is readable
       return config;
     }
   }
@@ -62,10 +68,99 @@ const buildConfigFromArgs = (): Config => {
   process.exit(1);
 };
 
+const buildSearch = (
+  config: Config,
+  query: querystring.ParsedUrlQuery
+): logs.Search | null => {
+  const { file, total, keywords } = query;
+  if (typeof file !== "string") {
+    return null;
+  }
+  const logFilePath = path.join(config.logsDir, file);
+  // TODO check that logFilePath exists, doesn't escape logsDir, etc.
+  if (typeof total !== "string") {
+    return null;
+  }
+  let totalNumber = Number(total);
+  if (!Number.isSafeInteger(totalNumber) || totalNumber < 0) {
+    return null;
+  }
+  let pred: (buffer: Buffer) => boolean;
+  if (keywords == null) {
+    pred = () => true;
+  } else {
+    // Some keywords would be silly, like empty string or newline, but I don't
+    // think any are invalid per se.
+    let keywordsArray: Array<Buffer>;
+    if (typeof keywords === "string") {
+      keywordsArray = [Buffer.from(keywords)];
+    } else {
+      keywordsArray = keywords.map(Buffer.from);
+    }
+    pred = (buffer: Buffer) => {
+      // A regular expression engine would probably be more efficient, though
+      // that would also suggest or require stronger validation of the keywords
+      // to prevent computation denial of service attacks with lookbehind
+      // patterns and the like.
+      //
+      // We could also say that this should be the domain of the logs package
+      // and change the search entry from pred to keywords.
+      return keywordsArray.every((keyword) => buffer.includes(keyword));
+    };
+  }
+  return {
+    maxLineLength: config.maxLineLength,
+    pageLength: config.pageLength,
+    path: logFilePath,
+    total: totalNumber,
+    pred,
+  };
+};
+
 const buildApp = (config: Config): Koa => {
   const app = new Koa();
-  app.use(async (ctx) => {
-    ctx.body = "Plain, simple Garak.";
+  app.use(async (ctx, next) => {
+    const { method, path, query } = ctx;
+    if (method === "GET" && path === "/logs") {
+      const search = buildSearch(config, query);
+      if (search == null) {
+        ctx.set("Content-Type", "text/plain");
+        ctx.body = `Invalid search`;
+        ctx.status = 422;
+      } else {
+        ctx.set("Content-Type", "application/octet-stream");
+        // This seems like a weird construction, perhaps there is a more
+        // performant way to hook an async generator up to a koa stream.
+        const s = new stream.Readable({ read() {} });
+        ctx.body = s;
+        try {
+          for await (const line of logs.findLatestLines(search)) {
+            s.push(line);
+          }
+          s.push(null);
+        } catch (err) {
+          console.error(`Stream error`, { search, err });
+          if (ctx.headerSent) {
+            // We've already written success, so the best we can do when
+            // streaming is clearly indicate an error condition, though it's
+            // worth noting that there is no unambiguous way to distinguish this
+            // condition from this exact message occuring in the corpus. If that
+            // is significant, we should introduce our own control and data
+            // message wrappers.
+            s.push(`Premature end of stream\n`);
+            s.push(null);
+          } else {
+            ctx.set("Content-Type", "text/plain");
+            ctx.body = `Filesystem error`;
+            // We should probably switch on the type of error to make sure it's
+            // really an ENOENT or whatever instead of a logic bug in the logs
+            // package and correctly classify the latter as a 500.
+            ctx.status = 503;
+          }
+        }
+      }
+    }
+    return next();
   });
   return app;
 };
