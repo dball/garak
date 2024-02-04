@@ -1,3 +1,6 @@
+import * as http from "node:http";
+import * as Koa from "koa";
+
 interface Config {
   port: number;
   logsDir: string;
@@ -59,6 +62,41 @@ const buildConfigFromArgs = (): Config => {
   process.exit(1);
 };
 
-if (require.main === module) {
+const buildApp = (config: Config): Koa => {
+  const app = new Koa();
+  app.use(async (ctx) => {
+    ctx.body = "Plain, simple Garak.";
+  });
+  return app;
+};
+
+const main = async () => {
   const config = buildConfigFromArgs();
+  const app = buildApp(config);
+  let server: http.Server | undefined;
+  const shutdown = async () => {
+    await new Promise<void>((resolve, reject) => {
+      server?.closeIdleConnections();
+      server?.close((err) => {
+        if (err == null) {
+          resolve();
+        } else {
+          reject(err);
+        }
+      });
+    });
+    process.stdout.write("Garak shutdown complete.");
+  };
+  process.on("SIGTERM", shutdown);
+  process.on("SIGINT", shutdown);
+  await new Promise<void>((resolve, reject) => {
+    server = app.listen(config.port);
+    server.once("listening", resolve);
+    server.once("error", reject);
+  });
+  process.stdout.write(`Garak listening on http://localhost:${config.port}\n`);
+};
+
+if (require.main === module) {
+  main();
 }

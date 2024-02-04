@@ -9,7 +9,9 @@
   "author": "Donald Ball <donald.ball@gmail.com>",
   "license": "GPL-3.0+",
   "dependencies": {
+    "@types/koa": "^2.14.0",
     "@types/node": "^20.11.16",
+    "koa": "^2.15.0",
     "ts-node": "^10.9.2"
   },
   "devDependencies": {
