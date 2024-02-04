@@ -14,7 +14,6 @@ const readFully = async (
 ): Promise<boolean> => {
   let { buffer, offset, length, position } = options;
   while (offset < length) {
-    console.log("reading chunk", { offset, length, position });
     const { bytesRead } = await fd.read({
       buffer,
       offset,
@@ -62,6 +61,10 @@ export const extractLatestLines = (
   let lastNewline = -1;
   for (let i = 0; i < buffer.length; i++) {
     if (buffer.at(i) === newline) {
+      // TODO we could subarray here and only copy on match in
+      // findMatchingLines, reducing allocations when pred is given or n is
+      // small. Alternately, we could pass the pred in here, but that feels
+      // complected.
       const line = Buffer.allocUnsafe(i - lastNewline);
       buffer.copy(line, 0, lastNewline + 1, i + 1);
       lines.push(line);
@@ -105,25 +108,29 @@ export const extractLatestLines = (
   };
 };
 
+export class LineOverflowError extends Error {
+  constructor() {
+    super("Line overflow error");
+  }
+}
+
 export async function* findLatestLines(search: Search): AsyncGenerator<Buffer> {
   const { path, total, pred, maxLineLength, pageLength } = search;
   const fd = await fs.open(path, fs.constants.O_RDONLY);
   try {
     const stat = await fd.stat();
     const fileLength = stat.size;
-    console.log("reading file", { path, fileLength, pageLength });
     let lastPosition = fileLength;
     let i = 0;
     let remainder = Buffer.alloc(0);
     const page = Buffer.alloc(pageLength);
-    while (i < total && lastPosition > 0) {
+    while (lastPosition > 0) {
       let length = pageLength;
       let position = lastPosition - pageLength;
       if (position < 0) {
         length += position;
         position = 0;
       }
-      console.log("reading page", { length, position });
       const fullyRead = await readFully(fd, {
         buffer: page,
         offset: 0,
@@ -136,28 +143,57 @@ export async function* findLatestLines(search: Search): AsyncGenerator<Buffer> {
         // seems both logically defensible and user-friendly.
         return;
       }
-      // We just yield the pages for now to see how buggy this junk is.
-      const result = Buffer.alloc(length);
-      page.copy(result);
-      yield result;
+      const buffer = length === pageLength ? page : page.subarray(0, length);
+      const { lines, prefix, overflow } = extractLatestLines(
+        maxLineLength,
+        buffer,
+        remainder
+      );
+      if (overflow) {
+        // We check for a maximum line length so that we can provide a
+        // reasonable guarantee that we won't run out of memory — our high water
+        // heap use is 2-3 times the page size. This seems like a reasonable
+        // constraint given the intent and the corpus on which we're likely to
+        // operate. Should it become unacceptable, our fallback is probably to
+        // model long lines as offsets into the file itself, but then we're
+        // susceptible to the file contents changing out from under us.
+        //
+        // Having found a line that's too long, we could ignore it and move on,
+        // but that risks obscuring a weird condition an operator ought to know
+        // about. We'll throw here, and figure out what actually to do with the
+        // error in the web service layer.
+        throw new LineOverflowError();
+      }
+      for (const line of lines) {
+        if (pred(line)) {
+          yield line;
+          i++;
+          if (i === total) {
+            return;
+          }
+        }
+      }
+      remainder = prefix;
       lastPosition -= length;
-      i++;
+    }
+    if (remainder.length !== 0 && pred(remainder)) {
+      yield remainder;
     }
   } finally {
     await fd.close();
   }
 }
 
+// This facilitates repl testing, easier than jest when I'm exploring.
 export const test = async () => {
   const results: Array<string> = [];
   const search: Search = {
     path: "tmp/large.log",
-    pageLength: 4096,
-    pred: () => true,
+    pageLength: 2 << 19,
+    pred: (buffer) => buffer.toString().includes("1 is even"),
     total: 4,
-    maxLineLength: 0,
+    maxLineLength: 2 << 15,
   };
-  console.log("testing");
   for await (const buf of findLatestLines(search)) {
     results.push(buf.toString());
   }
