@@ -2,7 +2,6 @@ import * as fs from "node:fs/promises";
 import * as http from "node:http";
 import * as path from "node:path";
 import * as querystring from "node:querystring";
-import * as stream from "node:stream";
 import * as Koa from "koa";
 import * as logs from "./logs";
 
@@ -129,36 +128,48 @@ const buildApp = (config: Config): Koa => {
         ctx.status = 422;
       } else {
         ctx.set("Content-Type", "application/octet-stream");
+        ctx.flushHeaders();
+        const writer = ctx.res;
         try {
           for await (const line of logs.findLatestLines(search)) {
-            if (!ctx.headerSent) {
-              ctx.flushHeaders();
-            }
-            ctx.res.write(line);
-            // TODO respect the drain limit
-            // TODO also how do we get the signal that the caller has closed the conn early?
-            // And can we then interrupt the generator? Seems like we'd need a control channel.
-            // Maybe this is why async generators aren't common.
+            // We're basically handling our own backpressure here instead of
+            // using a stream construct, but this is the only way I could get
+            // messages not to buffer. In this case, we prefer messages
+            // delivered immediately, so when searching large files for
+            // infrequent matches, the caller sees them as we find them.
+            await new Promise<void>((resolve, reject) => {
+              const notFull = writer.write(line, (err) => {
+                writer.removeListener("drain", resolve);
+                reject(err);
+              });
+              if (notFull) {
+                resolve();
+              } else {
+                writer.addListener("drain", resolve);
+              }
+            });
           }
-          ctx.res.end();
+          writer.end();
         } catch (err) {
-          console.error(`Stream error`, { search, err });
-          if (ctx.headerSent) {
+          if (err.code === "ERR_STREAM_DESTROYED") {
+            // Is there a cleaner way to get this before trying to write?
+            // Seems like there'd always be a race condition.
+            console.debug(`Caller closed connection`, { search });
+            // When the generator is collected, the finally block is
+            // called and the file handle is also collected.
+          } else {
+            console.error(`Stream error`, { search, err, code: err.code });
             // We've already written success, so the best we can do when
             // streaming is clearly indicate an error condition, though it's
             // worth noting that there is no unambiguous way to distinguish this
             // condition from this exact message occuring in the corpus. If that
             // is significant, we should introduce our own control and data
             // message wrappers.
-            ctx.res.write(`Premature end of stream\n`);
-            ctx.res.end();
-          } else {
-            ctx.set("Content-Type", "text/plain");
-            ctx.body = `Filesystem error`;
-            // We should probably switch on the type of error to make sure it's
-            // really an ENOENT or whatever instead of a logic bug in the logs
-            // package and correctly classify the latter as a 500.
-            ctx.status = 503;
+            try {
+              writer.end(`Premature end of stream\n`);
+            } catch (e) {
+              console.error(`Error reporting stream error`, { err: e });
+            }
           }
         }
       }
