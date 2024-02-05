@@ -129,15 +129,18 @@ const buildApp = (config: Config): Koa => {
         ctx.status = 422;
       } else {
         ctx.set("Content-Type", "application/octet-stream");
-        // This seems like a weird construction, perhaps there is a more
-        // performant way to hook an async generator up to a koa stream.
-        const s = new stream.Readable({ read() {} });
-        ctx.body = s;
         try {
           for await (const line of logs.findLatestLines(search)) {
-            s.push(line);
+            if (!ctx.headerSent) {
+              ctx.flushHeaders();
+            }
+            ctx.res.write(line);
+            // TODO respect the drain limit
+            // TODO also how do we get the signal that the caller has closed the conn early?
+            // And can we then interrupt the generator? Seems like we'd need a control channel.
+            // Maybe this is why async generators aren't common.
           }
-          s.push(null);
+          ctx.res.end();
         } catch (err) {
           console.error(`Stream error`, { search, err });
           if (ctx.headerSent) {
@@ -147,8 +150,8 @@ const buildApp = (config: Config): Koa => {
             // condition from this exact message occuring in the corpus. If that
             // is significant, we should introduce our own control and data
             // message wrappers.
-            s.push(`Premature end of stream\n`);
-            s.push(null);
+            ctx.res.write(`Premature end of stream\n`);
+            ctx.res.end();
           } else {
             ctx.set("Content-Type", "text/plain");
             ctx.body = `Filesystem error`;
