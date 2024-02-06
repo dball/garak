@@ -4,7 +4,7 @@
   "description": "Just a plain, simple log tailer.",
   "scripts": {
     "server": "ts-node src/server.ts",
-    "test": "ts-node src/test.ts"
+    "test": "jest"
   },
   "author": "Donald Ball <donald.ball@gmail.com>",
   "license": "GPL-3.0+",

@@ -3,7 +3,7 @@ import * as querystring from "node:querystring";
 import * as Koa from "koa";
 import * as logs from "./logs";
 
-interface Config {
+export interface Config {
   port: number;
   logsDir: string;
   pageLength: number;
@@ -27,7 +27,6 @@ const buildConfigFromArgs = (): Config => {
     let config: Config | null = { ...defaultConfig };
     for (let i = 2; i < process.argv.length && config != null; i += 2) {
       let name = process.argv[i];
-      console.log(name);
       if (!name.startsWith("--")) {
         config = null;
         break;
@@ -59,9 +58,9 @@ const buildConfigFromArgs = (): Config => {
       return config;
     }
   }
-  process.stderr.write(`Invalid arguments\nUsage:\n`);
+  console.error(`Invalid arguments\nUsage:`);
   for (const name of Object.keys(defaultConfig)) {
-    process.stderr.write(`[--${name} <value>]\n`);
+    console.error(`[--${name} <value>]`);
   }
   process.exit(1);
 };
@@ -74,6 +73,8 @@ const buildSearch = (
   if (typeof file !== "string") {
     return null;
   }
+  // Note if total should not actually be required, setting the search entry
+  // value to positive infinity is acceptable.
   if (typeof total !== "string") {
     return null;
   }
@@ -127,6 +128,8 @@ const buildApp = (config: Config): Koa => {
         ctx.body = `Invalid search\n`;
         ctx.status = 422;
       } else {
+        console.debug("Searching", search);
+        ctx.status = 200;
         ctx.set("Content-Type", "application/octet-stream");
         ctx.flushHeaders();
         const writer = ctx.res;
@@ -184,7 +187,7 @@ interface System {
   stop: () => Promise<void>;
 }
 
-const buildSystem = (config: Config): System => {
+export const buildSystem = (config: Config): System => {
   let server: http.Server | undefined;
   let port = config.port;
   return {
@@ -234,7 +237,7 @@ const main = async () => {
   process.on("SIGTERM", shutdown);
   process.on("SIGINT", shutdown);
   const { port } = await system.start();
-  console.info(`Garak listening on http://localhost:${port}\n`);
+  console.info(`Garak listening on http://localhost:${port}`);
 };
 
 if (require.main === module) {
