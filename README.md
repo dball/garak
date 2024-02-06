@@ -10,6 +10,26 @@ Garak provides a web service that allows callers to view the last _n_ entries in
 
 Garak is written in Typescript, targeting the nodejs runtime. It provides package scripts to execute the server via the `ts-node` launcher to keep the build process simple for demonstration purposes.
 
+## API
+
+The service provides a single path, `/logs`, which accepts `GET` requests with the following query parameters:
+
+- `file` — required, the path to the file under the logs directory, e.g. `messages` or `install.log`
+- `total`— required, the number of lines to return
+- `keywords` — optional, a string which must appear in a matching line. This may appear multiple times.
+
+For example:
+
+`http://localhost:8000/logs?file=system.log&total=2&keywords=syslogd&keywords=Feb`
+
+Successful responses will have status 200 with a content-type of
+`application/octet-stream`, the body of which contains the matching lines
+ordered from most to least recent. If the service encounters a filesystem error
+while reading the logs, the response will end with `Premature end of stream`.
+
+Invalid responses will have status 422. Invalid conditions include missing or
+unreadable files or paths to files outside of the logs directory.
+
 ## Usage
 
 On a system with node `20.9.0` or compatible in the environment:
@@ -29,9 +49,11 @@ Usage:
 [--maxLineLength <value>]
 ```
 
-By default, it listens on port 8000, serves entries from within `/var/log`, uses a page length of 1M, and assumes a maximum line length of 65536 bytes. The npm launcher requires a `--` separator to distinguish its args from the server args:
+By default, it listens on port 8000, serves entries from within `/var/log`, uses a page length of 1M, and assumes a maximum line length of 65536 bytes. The npm launcher requires a `--` separator to distinguish its args from the server args, e.g.:
 
 `npm run server -- --logsDir ./tmp`
+
+Garak emits logs of its own activity to stdout.
 
 ## Test
 
