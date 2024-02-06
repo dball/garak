@@ -64,3 +64,31 @@ localhost to exercise the service over http.
 
 - Demonstrate performant, testable, simple, and fault-tolerant code, in that order.
 - Provide a reasonable guarantee the service will not crash, hang, return unknown errors, or incorrectly report a request error as a server error.
+
+## Future Work
+
+The customer has expressed interest in distributed searches, in which a primary
+fans out to a set of secondaries and returns the aggregate responses. It would
+be straightforward to add a runtime configuration to the primary with the set of
+its secondaries if they are static, or even to resolve them at request time from
+a service registry. The essential difficulty with reconciling Garak to the
+federation is revising the log message format so that lines can be attributed to
+their servers correctly.
+
+I chose not to introduce any message format in the first version, for speed,
+simplicity, and to make using `curl` directly comparable to using `tail` on a
+local file. If server attribution is important, we could perhaps get away with
+simply printing the server identity as a prefix on each line, but it seems wiser
+to design a message protocol, which would afford us a place to unambiguously
+indicate error conditions (e.g. truncated file, file changing permission, or
+file line length exceeds limits).
+
+Other considerations include:
+
+- Would we want recursive distribution, and if so, how would we prohibit cycles
+  in the graph?
+- Do we need to enforce timeouts on our requests? What if one of our secondaries
+  is extremely slow?
+- If a secondary fails while we're processing a search, do we choose to retry?
+  If so, can the client receive duplicates, or do we need to consider
+  introducing cursors?
