@@ -1,6 +1,4 @@
-import * as fs from "node:fs/promises";
 import * as http from "node:http";
-import * as path from "node:path";
 import * as querystring from "node:querystring";
 import * as Koa from "koa";
 import * as logs from "./logs";
@@ -56,7 +54,6 @@ const buildConfigFromArgs = (): Config => {
       }
     }
     if (config != null) {
-      // TODO check that logsDir is readable
       return config;
     }
   }
@@ -75,8 +72,6 @@ const buildSearch = (
   if (typeof file !== "string") {
     return null;
   }
-  const logFilePath = path.join(config.logsDir, file);
-  // TODO check that logFilePath exists, doesn't escape logsDir, etc.
   if (typeof total !== "string") {
     return null;
   }
@@ -110,7 +105,8 @@ const buildSearch = (
   return {
     maxLineLength: config.maxLineLength,
     pageLength: config.pageLength,
-    path: logFilePath,
+    logsDir: config.logsDir,
+    file,
     total: totalNumber,
     pred,
   };
@@ -122,16 +118,18 @@ const buildApp = (config: Config): Koa => {
     const { method, path, query } = ctx;
     if (method === "GET" && path === "/logs") {
       const search = buildSearch(config, query);
-      if (search == null) {
+      const lineFinder = search && (await logs.buildLineFinder(search));
+      if (lineFinder == null) {
         ctx.set("Content-Type", "text/plain");
-        ctx.body = `Invalid search`;
+        // We should, of course, be more specific in reporting the reasons.
+        ctx.body = `Invalid search\n`;
         ctx.status = 422;
       } else {
         ctx.set("Content-Type", "application/octet-stream");
         ctx.flushHeaders();
         const writer = ctx.res;
         try {
-          for await (const line of logs.findLatestLines(search)) {
+          for await (const line of lineFinder.findLatestLines()) {
             // We're basically handling our own backpressure here instead of
             // using a stream construct, but this is the only way I could get
             // messages not to buffer. In this case, we prefer messages

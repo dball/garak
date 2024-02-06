@@ -1,11 +1,14 @@
 import * as fs from "node:fs/promises";
+import * as path from "node:path";
 
 export interface Search {
-  readonly path: string;
+  readonly file: string;
   readonly total: number;
   readonly pred: (buffer: Buffer) => boolean;
+
   readonly maxLineLength: number;
   readonly pageLength: number;
+  readonly logsDir: string;
 }
 
 const readFully = async (
@@ -114,87 +117,122 @@ export class LineOverflowError extends Error {
   }
 }
 
-export async function* findLatestLines(search: Search): AsyncGenerator<Buffer> {
-  const { path, total, pred, maxLineLength, pageLength } = search;
-  const fd = await fs.open(path, fs.constants.O_RDONLY);
+export interface LineFinder {
+  findLatestLines: () => AsyncGenerator<Buffer>;
+}
+
+/**
+ * Returns a line finder for the given search, or null if the search is not
+ * currently valid on the filesystem, e.g. the file does not exist, or cannot be
+ * read.
+ *
+ * The lineFinder instance *must* be used by calling `findLatestLines` on it
+ * once and only once, otherwise this will leak a file descriptor.
+ */
+// This is perhaps not the most elegant design, but it seems like the only
+// practical way to use the async generator function form and also avoid opening
+// the file more than once. With only a single internal caller, this seems like
+// a defensible choice.
+export const buildLineFinder = async (
+  search: Search
+): Promise<LineFinder | null> => {
+  const { file, total, pred, maxLineLength, pageLength, logsDir } = search;
+  const absoluteLogsPath = path.resolve(logsDir);
+  const absolutelogPath = path.resolve(path.join(absoluteLogsPath, file));
+  if (!absolutelogPath.startsWith(absoluteLogsPath)) {
+    // TODO Check with prodsec to make sure this is appropriate and sufficient.
+    return null;
+  }
   try {
+    const fd = await fs.open(absolutelogPath, fs.constants.O_RDONLY);
     const stat = await fd.stat();
     const fileLength = stat.size;
-    let lastPosition = fileLength;
-    let i = 0;
-    let remainder = Buffer.alloc(0);
-    const page = Buffer.alloc(pageLength);
-    while (lastPosition > 0) {
-      let length = pageLength;
-      let position = lastPosition - pageLength;
-      if (position < 0) {
-        length += position;
-        position = 0;
-      }
-      const fullyRead = await readFully(fd, {
-        buffer: page,
-        offset: 0,
-        length,
-        position,
-      });
-      if (!fullyRead) {
-        // If we hit the end of the file unexpectedly, we could reasonably just
-        // keep whatever we've generated thus far, or error out. The former
-        // seems both logically defensible and user-friendly.
-        return;
-      }
-      const buffer = length === pageLength ? page : page.subarray(0, length);
-      const { lines, prefix, overflow } = extractLatestLines(
-        maxLineLength,
-        buffer,
-        remainder
-      );
-      if (overflow) {
-        // We check for a maximum line length so that we can provide a
-        // reasonable guarantee that we won't run out of memory — our high water
-        // heap use is 2-3 times the page size. This seems like a reasonable
-        // constraint given the intent and the corpus on which we're likely to
-        // operate. Should it become unacceptable, our fallback is probably to
-        // model long lines as offsets into the file itself, but then we're
-        // susceptible to the file contents changing out from under us.
-        //
-        // Having found a line that's too long, we could ignore it and move on,
-        // but that risks obscuring a weird condition an operator ought to know
-        // about. We'll throw here, and figure out what actually to do with the
-        // error in the web service layer.
-        throw new LineOverflowError();
-      }
-      for (const line of lines) {
-        if (pred(line)) {
-          yield line;
-          i++;
-          if (i === total) {
-            return;
+    return {
+      findLatestLines: async function* () {
+        try {
+          let lastPosition = fileLength;
+          let i = 0;
+          let remainder = Buffer.alloc(0);
+          const page = Buffer.alloc(pageLength);
+          while (lastPosition > 0) {
+            let length = pageLength;
+            let position = lastPosition - pageLength;
+            if (position < 0) {
+              length += position;
+              position = 0;
+            }
+            const fullyRead = await readFully(fd, {
+              buffer: page,
+              offset: 0,
+              length,
+              position,
+            });
+            if (!fullyRead) {
+              // If we hit the end of the file unexpectedly, we could reasonably just
+              // keep whatever we've generated thus far, or error out. The former
+              // seems both logically defensible and user-friendly.
+              return;
+            }
+            const buffer =
+              length === pageLength ? page : page.subarray(0, length);
+            const { lines, prefix, overflow } = extractLatestLines(
+              maxLineLength,
+              buffer,
+              remainder
+            );
+            if (overflow) {
+              // We check for a maximum line length so that we can provide a
+              // reasonable guarantee that we won't run out of memory — our high water
+              // heap use is 2-3 times the page size. This seems like a reasonable
+              // constraint given the intent and the corpus on which we're likely to
+              // operate. Should it become unacceptable, our fallback is probably to
+              // model long lines as offsets into the file itself, but then we're
+              // susceptible to the file contents changing out from under us.
+              //
+              // Having found a line that's too long, we could ignore it and move on,
+              // but that risks obscuring a weird condition an operator ought to know
+              // about. We'll throw here, and figure out what actually to do with the
+              // error in the web service layer.
+              throw new LineOverflowError();
+            }
+            for (const line of lines) {
+              if (pred(line)) {
+                yield line;
+                i++;
+                if (i === total) {
+                  return;
+                }
+              }
+            }
+            remainder = prefix;
+            lastPosition -= length;
           }
+          if (remainder.length !== 0 && pred(remainder)) {
+            yield remainder;
+          }
+        } finally {
+          await fd.close();
         }
-      }
-      remainder = prefix;
-      lastPosition -= length;
-    }
-    if (remainder.length !== 0 && pred(remainder)) {
-      yield remainder;
-    }
-  } finally {
-    await fd.close();
+      },
+    };
+  } catch (err) {
+    return null;
   }
-}
+};
 
 // This facilitates repl testing, easier than jest when I'm exploring.
 export const test = async () => {
   const results: Array<string> = [];
   const search: Search = {
-    path: "tmp/large.log",
+    logsDir: "tmp",
+    file: "large.log",
     pageLength: 2 << 19,
     pred: (buffer) => buffer.toString().includes("1 is even"),
     total: 4,
     maxLineLength: 2 << 15,
   };
-  for await (const buf of findLatestLines(search)) {
+  const lineFinder = await buildLineFinder(search);
+  for await (const buf of lineFinder.findLatestLines()) {
     results.push(buf.toString());
   }
   return results;
