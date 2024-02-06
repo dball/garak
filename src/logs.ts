@@ -51,9 +51,8 @@ const newline = 0xa;
  * If there are no newlines in the buffer, it is prepended to the suffix and
  * returned as the prefix.
  *
- * All lines, including the prefix, are copied from the buffer, which is assumed
- * to be reused for performance. By contrast, the suffix is assumed to be
- * transient and may be used without copying.
+ * The lines may be slices of the buffer, which is intended to be reused when
+ * paging, so must be copied if used outside of the pagination.
  */
 export const extractLatestLines = (
   maxLineLength: number,
@@ -64,26 +63,21 @@ export const extractLatestLines = (
   let lastNewline = -1;
   for (let i = 0; i < buffer.length; i++) {
     if (buffer.at(i) === newline) {
-      // TODO we could subarray here and only copy on match in
-      // findMatchingLines, reducing allocations when pred is given or n is
-      // small. Alternately, we could pass the pred in here, but that feels
-      // complected.
-      const line = Buffer.allocUnsafe(i - lastNewline);
-      buffer.copy(line, 0, lastNewline + 1, i + 1);
-      lines.push(line);
+      lines.push(buffer.subarray(lastNewline + 1, i + 1));
       lastNewline = i;
     }
   }
   if (lastNewline === -1) {
-    const prefix = Buffer.allocUnsafe(suffix.length + buffer.length);
-    buffer.copy(prefix);
-    suffix.copy(prefix, buffer.length);
-    // TODO skip the allocation if overflow
-    return {
-      lines,
-      prefix,
-      overflow: suffix.length + buffer.length >= maxLineLength,
-    };
+    const overflow = suffix.length + buffer.length >= maxLineLength;
+    let prefix: Buffer;
+    if (overflow) {
+      prefix = Buffer.alloc(0);
+    } else {
+      prefix = Buffer.allocUnsafe(suffix.length + buffer.length);
+      buffer.copy(prefix);
+      suffix.copy(prefix, buffer.length);
+    }
+    return { lines, prefix, overflow };
   }
   // If the suffix ends with a newline, we prefix any remainder and append it to the lines
   // If the suffix does not end with a newline, we discard it and any remainder
@@ -197,7 +191,9 @@ export const buildLineFinder = async (
             }
             for (const line of lines) {
               if (pred(line)) {
-                yield line;
+                // Copy the line, since we don't have a strong guarantee that the caller
+                // will finish using the buffer before the page is recycled.
+                yield Buffer.from(line);
                 i++;
                 if (i === total) {
                   return;
