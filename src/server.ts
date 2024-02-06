@@ -45,6 +45,8 @@ const buildConfigFromArgs = (): Config => {
           break;
         case "number":
           config[name] = Number(value);
+          // All of our numbers are positive integers, so we don't need to
+          // bother with a stronger schema.
           if (!Number.isSafeInteger(config[name]) || config[name] <= 0) {
             config = null;
           }
@@ -177,31 +179,62 @@ const buildApp = (config: Config): Koa => {
   return app;
 };
 
+interface System {
+  start: () => Promise<Config>;
+  stop: () => Promise<void>;
+}
+
+const buildSystem = (config: Config): System => {
+  let server: http.Server | undefined;
+  let port = config.port;
+  return {
+    start: async () => {
+      await new Promise<void>((resolve, reject) => {
+        const app = buildApp(config);
+        server = app.listen(config.port);
+        server.once("listening", resolve);
+        server.once("error", reject);
+      });
+      if (server != null) {
+        const address = server.address();
+        if (address != null && typeof address !== "string") {
+          port = address.port;
+        }
+      }
+      return { ...config, port };
+    },
+    stop: async () => {
+      await new Promise<void>((resolve, reject) => {
+        server?.closeIdleConnections();
+        server?.close((err) => {
+          if (err == null) {
+            resolve();
+          } else {
+            reject(err);
+          }
+        });
+      });
+      server = undefined;
+    },
+  };
+};
+
 const main = async () => {
   const config = buildConfigFromArgs();
-  const app = buildApp(config);
-  let server: http.Server | undefined;
+  const system = buildSystem(config);
   const shutdown = async () => {
-    await new Promise<void>((resolve, reject) => {
-      server?.closeIdleConnections();
-      server?.close((err) => {
-        if (err == null) {
-          resolve();
-        } else {
-          reject(err);
-        }
-      });
-    });
-    process.stdout.write("Garak shutdown complete.");
+    try {
+      await system.stop();
+      console.info(`Garak shutdown complete`);
+    } catch (err) {
+      console.error(`Garak shutdown error`, err);
+      process.exit(2);
+    }
   };
   process.on("SIGTERM", shutdown);
   process.on("SIGINT", shutdown);
-  await new Promise<void>((resolve, reject) => {
-    server = app.listen(config.port);
-    server.once("listening", resolve);
-    server.once("error", reject);
-  });
-  process.stdout.write(`Garak listening on http://localhost:${config.port}\n`);
+  const { port } = await system.start();
+  console.info(`Garak listening on http://localhost:${port}\n`);
 };
 
 if (require.main === module) {
