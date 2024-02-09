@@ -47,9 +47,12 @@ Usage:
 [--logsDir <value>]
 [--pageLength <value>]
 [--maxLineLength <value>]
+[--algo <value>]
 ```
 
-By default, it listens on port 8000, serves entries from within `/var/log`, uses a page length of 1M, and assumes a maximum line length of 65536 bytes. The npm launcher requires a `--` separator to distinguish its args from the server args, e.g.:
+By default, it listens on port 8000, serves entries from within `/var/log`, uses a page length of 1M, assumes a maximum line length of 65536 bytes, and uses the "reverse" algorithm. The "stream" algorithm offers better performance for large files with few matches.
+
+The npm launcher requires a `--` separator to distinguish its args from the server args, e.g.:
 
 `npm run server -- --logsDir ./tmp`
 

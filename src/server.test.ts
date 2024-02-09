@@ -61,6 +61,10 @@ describe("server", () => {
     logsDir: testLogDir,
     pageLength: 2 << 19, // 1M
     maxLineLength: 2 << 15, // 64k
+    // TODO if "stream" sticks around, be sure to test that branch, but perhaps
+    // against a smaller test directory, since it takes 60+ seconds to run against
+    // large.log
+    algo: "reverse",
   };
   const system = server.buildSystem(config);
   let port = 0;

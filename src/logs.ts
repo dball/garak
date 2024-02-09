@@ -120,14 +120,20 @@ export interface LineFinder {
  * currently valid on the filesystem, e.g. the file does not exist, or cannot be
  * read.
  *
+ * This implementation reads the file in chunks going backwards. It is
+ * significantly slower than using node fs's readStream, but returns matches
+ * more quickly and does not process the entire file unless necessary.
+ *
  * The lineFinder instance *must* be used by calling `findLatestLines` on it
  * once and only once, otherwise this will leak a file descriptor.
  */
+// TODO compare with https://github.com/nodejs/node/blob/8a41d9b636be86350cd32847c3f89d327c4f6ff7/lib/internal/fs/streams.js#L248-L294
+// which is much faster, but processes the file in the wrong direction for our purposes.
 // This is perhaps not the most elegant design, but it seems like the only
 // practical way to use the async generator function form and also avoid opening
 // the file more than once. With only a single internal caller, this seems like
 // a defensible choice.
-export const buildLineFinder = async (
+export const buildReverseLineFinder = async (
   search: Search
 ): Promise<LineFinder | null> => {
   const { file, total, pred, maxLineLength, pageLength, logsDir } = search;
@@ -227,9 +233,100 @@ export const test = async () => {
     total: 4,
     maxLineLength: 2 << 15,
   };
-  const lineFinder = await buildLineFinder(search);
+  const lineFinder = await buildReverseLineFinder(search);
   for await (const buf of lineFinder.findLatestLines()) {
     results.push(buf.toString());
   }
   return results;
+};
+
+// Just like extractLatestLines, but going forwards, mostly to test
+// buildStreamLineFinder.
+// TODO put under unit test if it sticks around, such corner cases
+// TODO also enforce maxLineLength if we care. I still think we care.
+const splitIntoLines = (
+  prefix: Buffer,
+  page: Buffer
+): { lines: Array<Buffer>; suffix: Buffer } => {
+  let lastOffset = -1;
+  const lines: Array<Buffer> = [];
+  while (true) {
+    if (lastOffset === page.length - 1) {
+      return { lines, suffix: Buffer.alloc(0) };
+    }
+    const offset = page.indexOf(newline, lastOffset + 1);
+    if (offset === -1 && lastOffset == -1) {
+      const suffix = Buffer.allocUnsafe(prefix.length + page.length);
+      prefix.copy(suffix);
+      page.copy(suffix, prefix.length);
+      return { lines, suffix };
+    } else if (offset === -1) {
+      const suffix = page.subarray(lastOffset + 1);
+      return { lines, suffix };
+    } else if (lastOffset === -1 && prefix.length !== 0) {
+      const line = Buffer.allocUnsafe(prefix.length + offset + 1);
+      prefix.copy(line);
+      page.copy(line, prefix.length, 0, offset + 1);
+      lines.push(line);
+    } else {
+      const line = page.subarray(lastOffset + 1, offset + 1);
+      lines.push(line);
+    }
+    lastOffset = offset;
+  }
+};
+
+/**
+ * Returns a line finder for the given search, or null if the search is not
+ * currently valid on the filesystem, e.g. the file does not exist, or cannot be
+ * read.
+ *
+ * This implementation reads the file going forwards using the node fs
+ * readStream impl. It is significantly faster than manually reading chunks in
+ * reverse, probably due to delegating much of the work to v8, but it returns
+ * matches much less quickly, and always processes the entire file.
+ *
+ * The lineFinder instance *must* be used by calling `findLatestLines` on it
+ * once and only once, otherwise this will leak a file descriptor.
+ */
+
+export const buildStreamLineFinder = async (
+  search: Search
+): Promise<LineFinder | null> => {
+  const { file, total, pred, maxLineLength, pageLength, logsDir } = search;
+  const absoluteLogsPath = path.resolve(logsDir);
+  const absolutelogPath = path.resolve(path.join(absoluteLogsPath, file));
+  if (!absolutelogPath.startsWith(absoluteLogsPath)) {
+    // TODO Check with prodsec to make sure this is appropriate and sufficient.
+    return null;
+  }
+  try {
+    const fd = await fs.open(absolutelogPath, fs.constants.O_RDONLY);
+    const stream = fd.createReadStream({ highWaterMark: pageLength });
+    return {
+      findLatestLines: async function* () {
+        const matches: Array<Buffer> = [];
+        let remainder = Buffer.alloc(0);
+        for await (const chunk of stream.iterator()) {
+          const page: Buffer = chunk;
+          const { lines, suffix } = splitIntoLines(remainder, page);
+          remainder = suffix;
+          for (const line of lines) {
+            if (pred(line)) {
+              if (matches.length === total) {
+                matches.shift();
+              }
+              matches.push(line);
+            }
+          }
+        }
+        matches.reverse();
+        for (const line of matches) {
+          yield line;
+        }
+      },
+    };
+  } catch (err) {
+    return null;
+  }
 };

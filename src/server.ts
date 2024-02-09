@@ -8,6 +8,7 @@ export interface Config {
   logsDir: string;
   pageLength: number;
   maxLineLength: number;
+  algo: "reverse" | "stream";
 }
 
 const defaultConfig: Config = {
@@ -15,6 +16,7 @@ const defaultConfig: Config = {
   logsDir: "/var/log",
   pageLength: 2 << 19, // 1M
   maxLineLength: 2 << 15, // 64k
+  algo: "reverse",
 };
 
 /**
@@ -116,12 +118,16 @@ const buildSearch = (
 };
 
 const buildApp = (config: Config): Koa => {
+  const finderBuilder =
+    config.algo === "reverse"
+      ? logs.buildReverseLineFinder
+      : logs.buildStreamLineFinder;
   const app = new Koa();
   app.use(async (ctx, next) => {
     const { method, path, query } = ctx;
     if (method === "GET" && path === "/logs") {
       const search = buildSearch(config, query);
-      const lineFinder = search && (await logs.buildLineFinder(search));
+      const lineFinder = search && (await finderBuilder(search));
       if (lineFinder == null) {
         ctx.set("Content-Type", "text/plain");
         // We should, of course, be more specific in reporting the reasons.
